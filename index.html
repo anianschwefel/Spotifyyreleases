@@ -27,7 +27,6 @@
     font-size: 16px;
     font-weight: 700;
     cursor: pointer;
-    text-decoration: none;
     display: inline-block;
   }
   #login-btn:hover { background: #1ed760; }
@@ -72,7 +71,7 @@
 <h1>Neue <span>Releases</span></h1>
 <p>Automatisch alle neuen Alben & Singles deiner Spotify-Künstler</p>
 
-<a id="login-btn" href="#">Mit Spotify verbinden</a>
+<button id="login-btn" onclick="login()">Mit Spotify verbinden</button>
 
 <select id="days" onchange="loadReleases()">
   <option value="7">Letzte 7 Tage</option>
@@ -89,34 +88,90 @@
   const REDIRECT_URI = 'https://anianschwefel.github.io/Spotifyyreleases/';
   const SCOPES       = 'user-follow-read';
 
-  let token = null;
+  function generateRandom(length) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+    const arr = new Uint8Array(length);
+    crypto.getRandomValues(arr);
+    return Array.from(arr).map(b => chars[b % chars.length]).join('');
+  }
 
-  // Login-Link setzen
-  const authUrl = 'https://accounts.spotify.com/authorize'
-    + '?client_id='     + CLIENT_ID
-    + '&response_type=token'
-    + '&redirect_uri='  + encodeURIComponent(REDIRECT_URI)
-    + '&scope='         + encodeURIComponent(SCOPES);
+  async function sha256(plain) {
+    const data = new TextEncoder().encode(plain);
+    return crypto.subtle.digest('SHA-256', data);
+  }
 
-  document.getElementById('login-btn').href = authUrl;
+  function base64urlencode(buffer) {
+    return btoa(String.fromCharCode(...new Uint8Array(buffer)))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
 
-  // Token aus URL-Hash auslesen
-  function readToken() {
-    if (window.location.hash.includes('access_token')) {
-      const p = new URLSearchParams(window.location.hash.slice(1));
-      token = p.get('access_token');
-      localStorage.setItem('sp_token', token);
-      localStorage.setItem('sp_expiry', Date.now() + parseInt(p.get('expires_in') || 3600) * 1000);
-      window.location.hash = '';
-      return true;
+  async function login() {
+    const verifier  = generateRandom(64);
+    const challenge = base64urlencode(await sha256(verifier));
+    localStorage.setItem('pkce_verifier', verifier);
+    const url = 'https://accounts.spotify.com/authorize'
+      + '?client_id='             + CLIENT_ID
+      + '&response_type=code'
+      + '&redirect_uri='          + encodeURIComponent(REDIRECT_URI)
+      + '&scope='                 + encodeURIComponent(SCOPES)
+      + '&code_challenge_method=S256'
+      + '&code_challenge='        + challenge;
+    window.location.href = url;
+  }
+
+  async function fetchToken(code) {
+    const verifier = localStorage.getItem('pkce_verifier');
+    const res = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id:     CLIENT_ID,
+        grant_type:    'authorization_code',
+        code,
+        redirect_uri:  REDIRECT_URI,
+        code_verifier: verifier
+      })
+    });
+    const data = await res.json();
+    if (data.access_token) {
+      localStorage.setItem('sp_token',         data.access_token);
+      localStorage.setItem('sp_refresh_token', data.refresh_token || '');
+      localStorage.setItem('sp_expiry',        Date.now() + data.expires_in * 1000);
+      return data.access_token;
     }
+    throw new Error(JSON.stringify(data));
+  }
+
+  async function refreshToken() {
+    const refresh = localStorage.getItem('sp_refresh_token');
+    if (!refresh) return null;
+    const res = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id:     CLIENT_ID,
+        grant_type:    'refresh_token',
+        refresh_token: refresh
+      })
+    });
+    const data = await res.json();
+    if (data.access_token) {
+      localStorage.setItem('sp_token',  data.access_token);
+      localStorage.setItem('sp_expiry', Date.now() + data.expires_in * 1000);
+      return data.access_token;
+    }
+    return null;
+  }
+
+  async function getToken() {
     const t = localStorage.getItem('sp_token');
     const e = parseInt(localStorage.getItem('sp_expiry') || 0);
-    if (t && Date.now() < e) { token = t; return true; }
-    return false;
+    if (t && Date.now() < e - 60000) return t;
+    return await refreshToken();
   }
 
   async function api(url) {
+    const token = await getToken();
     const r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
     if (r.status === 401) { localStorage.clear(); location.reload(); }
     return r.json();
@@ -131,7 +186,6 @@
     document.getElementById('status').textContent = 'Lade Künstler…';
     document.getElementById('grid').innerHTML = '';
 
-    // Alle gefolgten Künstler laden
     let artists = [], next = 'https://api.spotify.com/v1/me/following?type=artist&limit=50';
     while (next) {
       const d = await api(next);
@@ -139,11 +193,9 @@
       next = d.artists.next;
     }
 
-    document.getElementById('status').textContent = `${artists.length} Künstler gefunden — lade Releases…`;
+    document.getElementById('status').textContent = `${artists.length} Künstler — lade Releases…`;
 
-    // Releases laden
-    const releases = [];
-    const seen = new Set();
+    const releases = [], seen = new Set();
     for (const artist of artists) {
       try {
         const d = await api(`https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&market=DE&limit=10`);
@@ -160,13 +212,13 @@
     document.getElementById('status').textContent = releases.length + ' neue Releases';
 
     if (releases.length === 0) {
-      document.getElementById('grid').innerHTML = '<p style="color:#555">Keine neuen Releases im gewählten Zeitraum.</p>';
+      document.getElementById('grid').innerHTML = '<p style="color:#555;margin-top:2rem;">Keine neuen Releases im gewählten Zeitraum.</p>';
       return;
     }
 
     document.getElementById('grid').innerHTML = releases.map(r => `
       <a class="card" href="${r.url}" target="_blank">
-        ${r.cover ? `<img src="${r.cover}" alt="${r.title}">` : ''}
+        ${r.cover ? `<img src="${r.cover}" alt="">` : ''}
         <div class="card-info">
           <div class="card-artist">${r.artist}</div>
           <div class="card-title">${r.title}</div>
@@ -176,12 +228,27 @@
     `).join('');
   }
 
-  // Start
-  if (readToken()) {
-    document.getElementById('login-btn').style.display = 'none';
-    document.getElementById('days').style.display = 'block';
-    loadReleases();
+  async function init() {
+    const params = new URLSearchParams(window.location.search);
+    const code   = params.get('code');
+    if (code) {
+      history.replaceState({}, '', REDIRECT_URI);
+      try {
+        await fetchToken(code);
+      } catch(e) {
+        document.getElementById('status').textContent = 'Fehler beim Login: ' + e.message;
+        return;
+      }
+    }
+    const token = await getToken();
+    if (token) {
+      document.getElementById('login-btn').style.display = 'none';
+      document.getElementById('days').style.display      = 'block';
+      loadReleases();
+    }
   }
+
+  init();
 </script>
 </body>
 </html>

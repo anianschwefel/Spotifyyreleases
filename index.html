@@ -30,6 +30,19 @@
     display: inline-block;
   }
   #login-btn:hover { background: #1ed760; }
+  #logout-btn {
+    background: transparent;
+    color: #555;
+    border: 1px solid #222;
+    padding: 8px 20px;
+    border-radius: 50px;
+    font-size: 13px;
+    cursor: pointer;
+    display: none;
+    margin-top: 1rem;
+    transition: all 0.15s;
+  }
+  #logout-btn:hover { border-color: #555; color: #888; }
   #status { margin-top: 2rem; font-size: 13px; color: #888; }
   #grid {
     display: grid;
@@ -67,44 +80,45 @@
 </style>
 </head>
 <body>
-
+ 
 <h1>Neue <span>Releases</span></h1>
 <p>Automatisch alle neuen Alben & Singles deiner Spotify-Künstler</p>
-
+ 
 <button id="login-btn" onclick="login()">Mit Spotify verbinden</button>
-
+<button id="logout-btn" onclick="logout()">Abmelden</button>
+ 
 <select id="days" onchange="loadReleases()">
   <option value="7">Letzte 7 Tage</option>
   <option value="14">Letzte 2 Wochen</option>
   <option value="30" selected>Letzter Monat</option>
   <option value="90">Letzte 3 Monate</option>
 </select>
-
+ 
 <div id="status"></div>
 <div id="grid"></div>
-
+ 
 <script>
   const CLIENT_ID    = 'eaa3c45c11f44c2886360d2148bc4794';
   const REDIRECT_URI = 'https://anianschwefel.github.io/Spotifyyreleases/';
   const SCOPES       = 'user-follow-read';
-
+ 
   function generateRandom(length) {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
     const arr = new Uint8Array(length);
     crypto.getRandomValues(arr);
     return Array.from(arr).map(b => chars[b % chars.length]).join('');
   }
-
+ 
   async function sha256(plain) {
     const data = new TextEncoder().encode(plain);
     return crypto.subtle.digest('SHA-256', data);
   }
-
+ 
   function base64urlencode(buffer) {
     return btoa(String.fromCharCode(...new Uint8Array(buffer)))
       .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
-
+ 
   async function login() {
     const verifier  = generateRandom(64);
     const challenge = base64urlencode(await sha256(verifier));
@@ -118,7 +132,19 @@
       + '&code_challenge='        + challenge;
     window.location.href = url;
   }
-
+ 
+  function logout() {
+    localStorage.removeItem('sp_token');
+    localStorage.removeItem('sp_refresh_token');
+    localStorage.removeItem('sp_expiry');
+    localStorage.removeItem('pkce_verifier');
+    document.getElementById('login-btn').style.display  = 'inline-block';
+    document.getElementById('logout-btn').style.display = 'none';
+    document.getElementById('days').style.display       = 'none';
+    document.getElementById('status').textContent       = '';
+    document.getElementById('grid').innerHTML           = '';
+  }
+ 
   async function fetchToken(code) {
     const verifier = localStorage.getItem('pkce_verifier');
     const res = await fetch('https://accounts.spotify.com/api/token', {
@@ -141,7 +167,7 @@
     }
     throw new Error(JSON.stringify(data));
   }
-
+ 
   async function refreshToken() {
     const refresh = localStorage.getItem('sp_refresh_token');
     if (!refresh) return null;
@@ -162,43 +188,45 @@
     }
     return null;
   }
-
+ 
   async function getToken() {
     const t = localStorage.getItem('sp_token');
     const e = parseInt(localStorage.getItem('sp_expiry') || 0);
     if (t && Date.now() < e - 60000) return t;
     return await refreshToken();
   }
-
+ 
   async function api(url) {
     const token = await getToken();
     const r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
-    if (r.status === 401) { localStorage.clear(); location.reload(); }
+    if (r.status === 401) { logout(); return null; }
     return r.json();
   }
-
+ 
   async function loadReleases() {
     const days = parseInt(document.getElementById('days').value);
     const since = new Date();
     since.setDate(since.getDate() - days);
     const sinceStr = since.toISOString().split('T')[0];
-
+ 
     document.getElementById('status').textContent = 'Lade Künstler…';
     document.getElementById('grid').innerHTML = '';
-
+ 
     let artists = [], next = 'https://api.spotify.com/v1/me/following?type=artist&limit=50';
     while (next) {
       const d = await api(next);
+      if (!d) return;
       artists.push(...d.artists.items);
       next = d.artists.next;
     }
-
+ 
     document.getElementById('status').textContent = `${artists.length} Künstler — lade Releases…`;
-
+ 
     const releases = [], seen = new Set();
     for (const artist of artists) {
       try {
         const d = await api(`https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&market=DE&limit=10`);
+        if (!d) continue;
         for (const a of d.items) {
           if (!seen.has(a.id) && a.release_date >= sinceStr) {
             seen.add(a.id);
@@ -207,15 +235,15 @@
         }
       } catch(e) {}
     }
-
+ 
     releases.sort((a, b) => b.date.localeCompare(a.date));
     document.getElementById('status').textContent = releases.length + ' neue Releases';
-
+ 
     if (releases.length === 0) {
       document.getElementById('grid').innerHTML = '<p style="color:#555;margin-top:2rem;">Keine neuen Releases im gewählten Zeitraum.</p>';
       return;
     }
-
+ 
     document.getElementById('grid').innerHTML = releases.map(r => `
       <a class="card" href="${r.url}" target="_blank">
         ${r.cover ? `<img src="${r.cover}" alt="">` : ''}
@@ -227,7 +255,7 @@
       </a>
     `).join('');
   }
-
+ 
   async function init() {
     const params = new URLSearchParams(window.location.search);
     const code   = params.get('code');
@@ -242,12 +270,13 @@
     }
     const token = await getToken();
     if (token) {
-      document.getElementById('login-btn').style.display = 'none';
-      document.getElementById('days').style.display      = 'block';
+      document.getElementById('login-btn').style.display  = 'none';
+      document.getElementById('logout-btn').style.display = 'inline-block';
+      document.getElementById('days').style.display       = 'block';
       loadReleases();
     }
   }
-
+ 
   init();
 </script>
 </body>

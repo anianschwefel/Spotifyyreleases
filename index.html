@@ -5,32 +5,81 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Neue Releases</title>
 <style>
-  body { background: #0a0a0a; color: #f0f0f0; font-family: sans-serif; padding: 2rem; }
-  h1 { color: #1DB954; margin-bottom: 0.5rem; }
-  button { background: #1DB954; color: #000; border: none; padding: 10px 24px; border-radius: 50px; font-size: 14px; font-weight: 700; cursor: pointer; margin: 4px; }
-  #logout-btn { background: transparent; color: #555; border: 1px solid #333; }
-  #debug { background: #111; border: 1px solid #222; border-radius: 8px; padding: 1rem; margin-top: 1rem; font-size: 12px; font-family: monospace; white-space: pre-wrap; line-height: 1.8; max-height: 600px; overflow-y: auto; }
-  .ok  { color: #1DB954; }
-  .err { color: #ff6b6b; }
-  .inf { color: #888; }
+  body {
+    background: #0a0a0a;
+    color: #f0f0f0;
+    font-family: sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 3rem 1rem;
+    min-height: 100vh;
+  }
+  h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+  h1 span { color: #1DB954; }
+  p { color: #888; margin-bottom: 2rem; font-size: 14px; }
+  #login-btn {
+    background: #1DB954; color: #000; border: none;
+    padding: 14px 36px; border-radius: 50px;
+    font-size: 16px; font-weight: 700; cursor: pointer;
+  }
+  #login-btn:hover { background: #1ed760; }
+  #logout-btn {
+    background: transparent; color: #555; border: 1px solid #333;
+    padding: 8px 20px; border-radius: 50px; font-size: 13px;
+    cursor: pointer; display: none; margin-top: 1rem;
+  }
+  #logout-btn:hover { border-color: #555; color: #888; }
+  #status { margin-top: 2rem; font-size: 13px; color: #888; text-align: center; }
+  #progress { width: 300px; height: 3px; background: #222; border-radius: 2px; margin: 8px auto 0; display: none; }
+  #progress-bar { height: 100%; background: #1DB954; border-radius: 2px; width: 0%; transition: width 0.3s; }
+  #days {
+    background: #111; border: 1px solid #222; color: #f0f0f0;
+    font-size: 13px; padding: 8px 12px; border-radius: 6px;
+    margin-top: 1rem; cursor: pointer; display: none;
+  }
+  #grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 16px; width: 100%; max-width: 900px; margin-top: 2rem;
+  }
+  .card {
+    background: #111; border-radius: 8px; overflow: hidden;
+    text-decoration: none; color: inherit; transition: background 0.15s;
+  }
+  .card:hover { background: #1a1a1a; }
+  .card img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+  .card-info { padding: 10px 12px; }
+  .card-artist { font-size: 11px; color: #1DB954; margin-bottom: 3px; }
+  .card-title { font-size: 14px; font-weight: 600; line-height: 1.3; }
+  .card-meta { font-size: 11px; color: #555; margin-top: 4px; }
 </style>
 </head>
 <body>
-<h1>Spotify Debug v2</h1>
+
+<h1>Neue <span>Releases</span></h1>
+<p>Automatisch alle neuen Alben & Singles deiner Spotify-Künstler</p>
+
 <button id="login-btn" onclick="login()">Mit Spotify verbinden</button>
-<button id="logout-btn" onclick="logout()" style="display:none">Abmelden</button>
-<div id="debug">Warte auf Login…</div>
+<button id="logout-btn" onclick="logout()">Abmelden</button>
+
+<select id="days" onchange="loadReleases()">
+  <option value="7">Letzte 7 Tage</option>
+  <option value="14">Letzte 2 Wochen</option>
+  <option value="30" selected>Letzter Monat</option>
+  <option value="90">Letzte 3 Monate</option>
+</select>
+
+<div id="status"></div>
+<div id="progress"><div id="progress-bar"></div></div>
+<div id="grid"></div>
 
 <script>
   const CLIENT_ID    = 'eaa3c45c11f44c2886360d2148bc4794';
   const REDIRECT_URI = 'https://anianschwefel.github.io/Spotifyyreleases/';
   const SCOPES       = 'user-follow-read';
 
-  const log = (msg, cls='inf') => {
-    const d = document.getElementById('debug');
-    d.innerHTML += `<span class="${cls}">${msg}</span>\n`;
-    d.scrollTop = d.scrollHeight;
-  };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   function generateRandom(n) {
     const c = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
@@ -99,60 +148,109 @@
     return null;
   }
 
-  async function run() {
-    document.getElementById('debug').innerHTML = '';
-    const token = await getToken();
-    if (!token) { log('❌ Kein Token', 'err'); return; }
+  // API-Aufruf mit automatischem Retry bei Rate-Limit
+  async function api(url, token, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+      const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+      if (res.status === 429) {
+        // Rate limit — warte und versuche nochmal
+        const retryAfter = parseInt(res.headers.get('Retry-After') || '2') * 1000 + 500;
+        await sleep(retryAfter);
+        continue;
+      }
+      if (res.status === 401) { logout(); return null; }
+      if (!res.ok) return null;
+      return res.json();
+    }
+    return null;
+  }
 
-    log('🎤 Lade Künstler…');
+  async function loadReleases() {
+    const token = await getToken();
+    if (!token) return;
+
+    const days = parseInt(document.getElementById('days').value);
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+    const sinceStr = since.toISOString().split('T')[0];
+
+    document.getElementById('status').textContent = 'Lade Künstler…';
+    document.getElementById('progress').style.display = 'block';
+    document.getElementById('progress-bar').style.width = '0%';
+    document.getElementById('grid').innerHTML = '';
+
+    // Alle gefolgten Künstler laden
     let artists = [];
     let next = 'https://api.spotify.com/v1/me/following?type=artist&limit=50';
     while (next) {
-      const res = await fetch(next, { headers: { Authorization: 'Bearer ' + token } });
-      const data = await res.json();
-      if (!data.artists) { log('❌ ' + JSON.stringify(data), 'err'); break; }
-      artists.push(...data.artists.items);
-      next = data.artists.next;
+      const d = await api(next, token);
+      if (!d) break;
+      artists.push(...d.artists.items);
+      next = d.artists.next;
+      await sleep(200);
     }
-    log(`✅ ${artists.length} Künstler`, 'ok');
 
-    // Zeige erste 3 Künstler-IDs zur Diagnose
-    log('\n🔍 Erste 3 Künstler-IDs:');
-    artists.slice(0, 3).forEach(a => log(`  ${a.name}: "${a.id}"`));
+    document.getElementById('status').textContent = `${artists.length} Künstler — lade Releases…`;
 
-    // Bereinige IDs — entferne alles was kein alphanumerisches Zeichen ist
-    const cleanId = id => id ? id.trim().replace(/[^a-zA-Z0-9]/g, '') : null;
+    const releases = [];
+    const seen = new Set();
 
-    const since = new Date();
-    since.setDate(since.getDate() - 90);
-    const sinceStr = since.toISOString().split('T')[0];
-    log(`\n💿 Suche seit ${sinceStr}…\n`);
+    for (let i = 0; i < artists.length; i++) {
+      const artist = artists[i];
 
-    let totalFound = 0;
-    for (const artist of artists) {
-      const id = cleanId(artist.id);
-      if (!id || id.length < 10) {
-        log(`⚠️ Überspringe ${artist.name} — ungültige ID: "${artist.id}"`, 'err');
-        continue;
-      }
-      try {
-        const url = `https://api.spotify.com/v1/artists/${id}/albums?include_groups=album,single&market=DE&limit=10`;
-        const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
-        const data = await res.json();
-        if (res.status !== 200) {
-          log(`❌ ${artist.name}: ${res.status} — ${JSON.stringify(data)}`, 'err');
-          continue;
+      // Fortschrittsbalken aktualisieren
+      document.getElementById('progress-bar').style.width = Math.round((i / artists.length) * 100) + '%';
+      document.getElementById('status').textContent = `${i + 1} / ${artists.length} Künstler geladen…`;
+
+      const d = await api(
+        `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&market=DE&limit=10`,
+        token
+      );
+
+      if (d && d.items) {
+        for (const a of d.items) {
+          if (!seen.has(a.id) && a.release_date >= sinceStr) {
+            seen.add(a.id);
+            releases.push({
+              artist: artist.name,
+              title:  a.name,
+              type:   a.album_type,
+              date:   a.release_date,
+              cover:  a.images?.[1]?.url,
+              url:    a.external_urls?.spotify
+            });
+          }
         }
-        const newOnes = data.items.filter(a => a.release_date >= sinceStr);
-        if (newOnes.length > 0) {
-          totalFound += newOnes.length;
-          newOnes.forEach(a => log(`✅ ${artist.name} — ${a.name} (${a.release_date})`, 'ok'));
-        }
-      } catch(e) {
-        log(`❌ ${artist.name} (${artist.id}): ${e.message}`, 'err');
       }
+
+      // Pause zwischen Anfragen — verhindert Rate-Limit
+      await sleep(300);
     }
-    log(`\n🎉 Fertig! ${totalFound} neue Releases.`, totalFound > 0 ? 'ok' : 'inf');
+
+    document.getElementById('progress-bar').style.width = '100%';
+    releases.sort((a, b) => b.date.localeCompare(a.date));
+
+    setTimeout(() => {
+      document.getElementById('progress').style.display = 'none';
+    }, 500);
+
+    document.getElementById('status').textContent = releases.length + ' neue Releases';
+
+    if (releases.length === 0) {
+      document.getElementById('grid').innerHTML = '<p style="color:#555;margin-top:2rem;">Keine neuen Releases im gewählten Zeitraum.</p>';
+      return;
+    }
+
+    document.getElementById('grid').innerHTML = releases.map(r => `
+      <a class="card" href="${r.url}" target="_blank">
+        ${r.cover ? `<img src="${r.cover}" alt="">` : ''}
+        <div class="card-info">
+          <div class="card-artist">${r.artist}</div>
+          <div class="card-title">${r.title}</div>
+          <div class="card-meta">${r.type} · ${r.date}</div>
+        </div>
+      </a>
+    `).join('');
   }
 
   async function init() {
@@ -160,15 +258,17 @@
     const code = params.get('code');
     if (code) {
       history.replaceState({}, '', REDIRECT_URI);
-      try { await fetchToken(code); } catch(e) { log('❌ ' + e.message, 'err'); return; }
+      try { await fetchToken(code); } catch(e) {
+        document.getElementById('status').textContent = 'Fehler: ' + e.message;
+        return;
+      }
     }
     const token = await getToken();
     if (token) {
       document.getElementById('login-btn').style.display = 'none';
       document.getElementById('logout-btn').style.display = 'inline-block';
-      run();
-    } else {
-      log('Bitte mit Spotify verbinden.');
+      document.getElementById('days').style.display = 'block';
+      loadReleases();
     }
   }
 

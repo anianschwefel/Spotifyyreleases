@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Neue Releases — Debug</title>
+<title>Neue Releases</title>
 <style>
   body { background: #0a0a0a; color: #f0f0f0; font-family: sans-serif; padding: 2rem; }
   h1 { color: #1DB954; margin-bottom: 0.5rem; }
@@ -16,7 +16,7 @@
 </style>
 </head>
 <body>
-<h1>Spotify Debug</h1>
+<h1>Spotify Debug v2</h1>
 <button id="login-btn" onclick="login()">Mit Spotify verbinden</button>
 <button id="logout-btn" onclick="logout()" style="display:none">Abmelden</button>
 <div id="debug">Warte auf Login…</div>
@@ -38,12 +38,8 @@
     crypto.getRandomValues(a);
     return Array.from(a).map(b => c[b % c.length]).join('');
   }
-  async function sha256(p) {
-    return crypto.subtle.digest('SHA-256', new TextEncoder().encode(p));
-  }
-  function b64url(buf) {
-    return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-  }
+  async function sha256(p) { return crypto.subtle.digest('SHA-256', new TextEncoder().encode(p)); }
+  function b64url(buf) { return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
 
   async function login() {
     const v = generateRandom(64);
@@ -64,15 +60,12 @@
   }
 
   async function fetchToken(code) {
-    log('🔑 Hole Token…');
     const res = await fetch('https://accounts.spotify.com/api/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
-        client_id: CLIENT_ID,
-        grant_type: 'authorization_code',
-        code,
-        redirect_uri: REDIRECT_URI,
+        client_id: CLIENT_ID, grant_type: 'authorization_code',
+        code, redirect_uri: REDIRECT_URI,
         code_verifier: localStorage.getItem('pkce_verifier')
       })
     });
@@ -81,7 +74,6 @@
       localStorage.setItem('sp_token', data.access_token);
       localStorage.setItem('sp_refresh_token', data.refresh_token || '');
       localStorage.setItem('sp_expiry', Date.now() + data.expires_in * 1000);
-      log('✅ Token erhalten!', 'ok');
       return data.access_token;
     }
     throw new Error(JSON.stringify(data));
@@ -112,48 +104,55 @@
     const token = await getToken();
     if (!token) { log('❌ Kein Token', 'err'); return; }
 
-    // Alle gefolgten Künstler laden
-    log('🎤 Lade alle gefolgten Künstler…');
+    log('🎤 Lade Künstler…');
     let artists = [];
     let next = 'https://api.spotify.com/v1/me/following?type=artist&limit=50';
     while (next) {
       const res = await fetch(next, { headers: { Authorization: 'Bearer ' + token } });
       const data = await res.json();
-      if (!data.artists) { log('❌ Fehler: ' + JSON.stringify(data), 'err'); break; }
+      if (!data.artists) { log('❌ ' + JSON.stringify(data), 'err'); break; }
       artists.push(...data.artists.items);
       next = data.artists.next;
     }
-    log(`✅ ${artists.length} Künstler gefunden`, 'ok');
+    log(`✅ ${artists.length} Künstler`, 'ok');
 
-    // Releases für jeden Künstler testen
+    // Zeige erste 3 Künstler-IDs zur Diagnose
+    log('\n🔍 Erste 3 Künstler-IDs:');
+    artists.slice(0, 3).forEach(a => log(`  ${a.name}: "${a.id}"`));
+
+    // Bereinige IDs — entferne alles was kein alphanumerisches Zeichen ist
+    const cleanId = id => id ? id.trim().replace(/[^a-zA-Z0-9]/g, '') : null;
+
     const since = new Date();
     since.setDate(since.getDate() - 90);
     const sinceStr = since.toISOString().split('T')[0];
-    log(`\n💿 Suche Releases seit ${sinceStr}…\n`);
+    log(`\n💿 Suche seit ${sinceStr}…\n`);
 
     let totalFound = 0;
     for (const artist of artists) {
+      const id = cleanId(artist.id);
+      if (!id || id.length < 10) {
+        log(`⚠️ Überspringe ${artist.name} — ungültige ID: "${artist.id}"`, 'err');
+        continue;
+      }
       try {
-        const url = `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&market=DE&limit=10`;
+        const url = `https://api.spotify.com/v1/artists/${id}/albums?include_groups=album,single&market=DE&limit=10`;
         const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
         const data = await res.json();
-
         if (res.status !== 200) {
-          log(`❌ ${artist.name}: Status ${res.status} — ${JSON.stringify(data)}`, 'err');
+          log(`❌ ${artist.name}: ${res.status} — ${JSON.stringify(data)}`, 'err');
           continue;
         }
-
         const newOnes = data.items.filter(a => a.release_date >= sinceStr);
         if (newOnes.length > 0) {
           totalFound += newOnes.length;
           newOnes.forEach(a => log(`✅ ${artist.name} — ${a.name} (${a.release_date})`, 'ok'));
         }
       } catch(e) {
-        log(`❌ ${artist.name}: Exception — ${e.message}`, 'err');
+        log(`❌ ${artist.name} (${artist.id}): ${e.message}`, 'err');
       }
     }
-
-    log(`\n🎉 Fertig! ${totalFound} neue Releases gefunden.`, totalFound > 0 ? 'ok' : 'inf');
+    log(`\n🎉 Fertig! ${totalFound} neue Releases.`, totalFound > 0 ? 'ok' : 'inf');
   }
 
   async function init() {

@@ -25,6 +25,7 @@
   const CLIENT_ID    = 'eaa3c45c11f44c2886360d2148bc4794';
   const REDIRECT_URI = 'https://anianschwefel.github.io/Spotifyyreleases/';
   const SCOPES       = 'user-follow-read';
+
   const log = (msg, cls='inf') => {
     const d = document.getElementById('debug');
     d.innerHTML += `<span class="${cls}">${msg}</span>\n`;
@@ -63,7 +64,7 @@
   }
 
   async function fetchToken(code) {
-    log('🔑 Hole Token von Spotify…');
+    log('🔑 Hole Token…');
     const res = await fetch('https://accounts.spotify.com/api/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -76,7 +77,6 @@
       })
     });
     const data = await res.json();
-    log('Token Antwort: ' + JSON.stringify(data));
     if (data.access_token) {
       localStorage.setItem('sp_token', data.access_token);
       localStorage.setItem('sp_refresh_token', data.refresh_token || '');
@@ -84,14 +84,13 @@
       log('✅ Token erhalten!', 'ok');
       return data.access_token;
     }
-    throw new Error('Kein Token: ' + JSON.stringify(data));
+    throw new Error(JSON.stringify(data));
   }
 
   async function getToken() {
     const t = localStorage.getItem('sp_token');
     const e = parseInt(localStorage.getItem('sp_expiry') || 0);
     if (t && Date.now() < e - 60000) return t;
-    log('🔄 Token erneuern…');
     const refresh = localStorage.getItem('sp_refresh_token');
     if (!refresh) return null;
     const res = await fetch('https://accounts.spotify.com/api/token', {
@@ -100,7 +99,6 @@
       body: new URLSearchParams({ client_id: CLIENT_ID, grant_type: 'refresh_token', refresh_token: refresh })
     });
     const data = await res.json();
-    log('Refresh Antwort: ' + JSON.stringify(data));
     if (data.access_token) {
       localStorage.setItem('sp_token', data.access_token);
       localStorage.setItem('sp_expiry', Date.now() + data.expires_in * 1000);
@@ -109,50 +107,53 @@
     return null;
   }
 
-  async function api(url, token) {
-    const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
-    const data = await res.json();
-    return { status: res.status, data };
-  }
-
   async function run() {
     document.getElementById('debug').innerHTML = '';
     const token = await getToken();
-    if (!token) { log('❌ Kein gültiger Token', 'err'); return; }
+    if (!token) { log('❌ Kein Token', 'err'); return; }
 
-    log('✅ Token vorhanden', 'ok');
-
-    // Teste: Wer bin ich?
-    log('\n👤 Teste /me …');
-    const me = await api('https://api.spotify.com/v1/me', token);
-    log('Status: ' + me.status);
-    log('Nutzer: ' + JSON.stringify({ id: me.data.id, name: me.data.display_name, email: me.data.email }), me.status === 200 ? 'ok' : 'err');
-
-    // Teste: Gefolgten Künstler
-    log('\n🎤 Teste /me/following …');
-    const following = await api('https://api.spotify.com/v1/me/following?type=artist&limit=5', token);
-    log('Status: ' + following.status);
-    if (following.status === 200) {
-      const total = following.data.artists?.total;
-      const names = following.data.artists?.items?.map(a => a.name).join(', ');
-      log(`Gesamt: ${total} Künstler`, 'ok');
-      log(`Erste 5: ${names}`, 'ok');
-
-      // Teste einen Künstler
-      const first = following.data.artists?.items?.[0];
-      if (first) {
-        log(`\n💿 Teste Releases für "${first.name}" …`);
-        const albums = await api(`https://api.spotify.com/v1/artists/${first.id}/albums?include_groups=album,single&market=DE&limit=5`, token);
-        log('Status: ' + albums.status);
-        if (albums.status === 200) {
-          log('Releases: ' + albums.data.items.map(a => `${a.name} (${a.release_date})`).join(', '), 'ok');
-        } else {
-          log('Fehler: ' + JSON.stringify(albums.data), 'err');
-        }
-      }
-    } else {
-      log('Fehler: ' + JSON.stringify(following.data), 'err');
+    // Alle gefolgten Künstler laden
+    log('🎤 Lade alle gefolgten Künstler…');
+    let artists = [];
+    let next = 'https://api.spotify.com/v1/me/following?type=artist&limit=50';
+    while (next) {
+      const res = await fetch(next, { headers: { Authorization: 'Bearer ' + token } });
+      const data = await res.json();
+      if (!data.artists) { log('❌ Fehler: ' + JSON.stringify(data), 'err'); break; }
+      artists.push(...data.artists.items);
+      next = data.artists.next;
     }
+    log(`✅ ${artists.length} Künstler gefunden`, 'ok');
+
+    // Releases für jeden Künstler testen
+    const since = new Date();
+    since.setDate(since.getDate() - 90);
+    const sinceStr = since.toISOString().split('T')[0];
+    log(`\n💿 Suche Releases seit ${sinceStr}…\n`);
+
+    let totalFound = 0;
+    for (const artist of artists) {
+      try {
+        const url = `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&market=DE&limit=10`;
+        const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+        const data = await res.json();
+
+        if (res.status !== 200) {
+          log(`❌ ${artist.name}: Status ${res.status} — ${JSON.stringify(data)}`, 'err');
+          continue;
+        }
+
+        const newOnes = data.items.filter(a => a.release_date >= sinceStr);
+        if (newOnes.length > 0) {
+          totalFound += newOnes.length;
+          newOnes.forEach(a => log(`✅ ${artist.name} — ${a.name} (${a.release_date})`, 'ok'));
+        }
+      } catch(e) {
+        log(`❌ ${artist.name}: Exception — ${e.message}`, 'err');
+      }
+    }
+
+    log(`\n🎉 Fertig! ${totalFound} neue Releases gefunden.`, totalFound > 0 ? 'ok' : 'inf');
   }
 
   async function init() {
